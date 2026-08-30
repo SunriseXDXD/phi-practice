@@ -604,6 +604,19 @@ function handlePointer(event) {
   handlePausePointer(event);
 }
 
+function handleTouchStart(event) {
+  for (let i = 0; i < event.changedTouches.length; i++) {
+    let touch = event.changedTouches[i];
+    handlePointer({
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      preventDefault() {
+        event.preventDefault();
+      }
+    });
+  }
+}
+
 function updatePauseTimer(deltaTime) {
   if (pauseTime <= 0) return;
   pauseTime = Math.max(0, pauseTime - deltaTime);
@@ -646,6 +659,7 @@ function gameLoop(now) {
 window.addEventListener("resize", resizeCanvas);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", resizeCanvas);
 canvas.addEventListener("pointerdown", handlePointer);
+canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
 zipInput.addEventListener("change", async () => {
   let file = zipInput.files[0];
   if (file) {
