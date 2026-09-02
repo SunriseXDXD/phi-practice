@@ -532,6 +532,19 @@ function resumeLevel() {
   level.audioRequested = false;
 }
 
+function retryLevel() {
+  if (level.music) {
+    level.music.pause();
+    level.music.currentTime = 0;
+  }
+  level.audioTime = 0;
+  level.nowTime = 0;
+  level.startTime = -1;
+  level.startDelay = 1.5;
+  level.audioStarted = false;
+  level.audioRequested = false;
+}
+
 function handlePausePointer(event) {
   if (paused || !isInsidePauseHitbox(event.clientX, event.clientY)) return;
   event.preventDefault();
@@ -546,6 +559,12 @@ function handlePausePointer(event) {
 
 function handlePauseMenuPointer(event) {
   event.preventDefault();
+  if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 0) && level.zip) {
+    pauseTime = 0;
+    retryLevel();
+    paused = false;
+    return;
+  }
   if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 2) && level.zip) {
     pauseTime = 0;
     resumeLevel();
