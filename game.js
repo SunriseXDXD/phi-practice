@@ -74,6 +74,11 @@ let effectiveAspect = 0;
 let pauseTime = 0;
 let paused = true;
 let lastFrameTime = performance.now();
+let perfectTimeRange = 0.08;
+let goodTimeRange = 0.18;
+let badTimeRange = 0.22;
+let chartNoteSortByTime = [];
+let lineStates = [];
 let fingers = [];
 let fingerById = new Map();
 let pendingFingerEvents = [];
@@ -216,6 +221,7 @@ function prepareChart(chart) {
       (i < notes.length - 1 && Math.abs(notes[i + 1].realTime - notes[i].realTime) < 0.001)
     );
   }
+  chartNoteSortByTime = notes;
 }
 
 function getLineEvent(events, nowTime) {
@@ -309,9 +315,9 @@ function drawJudgeLine(x, y, angle, alpha) {
   ctx.restore();
 }
 
-function drawJudgeLines() {
+function updateJudgeLineStates() {
+  lineStates = [];
   if (!level.chart) return;
-  let lineStates = [];
   for (let line of level.chart.judgeLineList) {
     let moveEvent = getLineEvent(line.judgeLineMoveEvents, level.nowTime);
     let rotateEvent = getLineEvent(line.judgeLineRotateEvents, level.nowTime);
@@ -327,7 +333,10 @@ function drawJudgeLines() {
     let currentFloor = speedEvent.floorPosition + (level.nowTime - speedEvent.startTime) * speedEvent.value;
     lineStates.push({ line, x, y, angle, alpha, currentFloor });
   }
+}
 
+function drawJudgeLines() {
+  if (!level.chart) return;
   for (let state of lineStates) { // lines
     drawJudgeLine(state.x, state.y, state.angle, state.alpha);
   }
@@ -342,6 +351,17 @@ function drawJudgeLines() {
     }
   }
 }
+
+function fingerOnLine(finger, state) {
+  let dx = finger.nowPosition.x - state.x;
+  let dy = finger.nowPosition.y - state.y;
+  let angle = state.angle * Math.PI / 180;
+  return {
+    x: dx * Math.cos(angle) + dy * Math.sin(angle),
+    y: -dx * Math.sin(angle) + dy * Math.cos(angle)
+  };
+}
+
 function drawBackground() {
   // temporary
   let image = level.illustrationBlur;
@@ -592,9 +612,79 @@ function updateFlickTrigger(deltaTime) {
   }
 }
 
+function CheckNote(finger) {
+  let best = null;
+  let bestAbsDt = 10000;
+
+  let end = -1;
+  while (end + 1 < chartNoteSortByTime.length) {
+    let note = chartNoteSortByTime[end + 1];
+    if (note.realTime >= level.nowTime + badTimeRange) break;
+    end++;
+  }
+  if (end < 0) return null;
+
+  let start = end;
+  while (start > 0) {
+    let note = chartNoteSortByTime[start - 1];
+    if (note.realTime <= level.nowTime - goodTimeRange) break;
+    start--;
+  }
+
+  for (let i = start; i <= end; i++) {
+    let note = chartNoteSortByTime[i];
+    if (note.isJudged) continue;
+
+    let dt = note.realTime - level.nowTime;
+    let state = lineStates[Math.floor(note.judgeLineIndex / 2)];
+    if (!state) continue;
+    let position = fingerOnLine(finger, state);
+    let dx = Math.abs(note.positionX - position.x);
+    if (dx >= 1.9) continue;
+    if (dt >= bestAbsDt + 0.01) continue;
+
+    let badLimit = badTimeRange;
+    if (dx > 0.9) {
+      badLimit = badTimeRange - (dx - 0.9) * perfectTimeRange * 0.5;
+    }
+    if (dt > badLimit) continue;
+
+    if (best != null) {
+      if (best.type != 2 && best.type != 4) {
+        if (note.type != 1 && note.type != 3) continue;
+        if (Math.abs(best.realTime - note.realTime) > 0.01) continue;
+        let bestState = lineStates[Math.floor(best.judgeLineIndex / 2)];
+        if (!bestState) continue;
+        let bestPosition = fingerOnLine(finger, bestState);
+        let noteMetric = Math.abs(note.positionX - position.x) + Math.abs(position.y / 2.2);
+        let bestMetric = Math.abs(best.positionX - bestPosition.x) + Math.abs(bestPosition.y / 2.2);
+        if (noteMetric >= bestMetric) continue;
+      }
+    }
+
+    best = note;
+    bestAbsDt = Math.abs(dt);
+  }
+
+  if (best == null) return null;
+  if (best.type == 4) return best;
+  if (best.type == 1 || best.type == 2 || best.type == 3) {
+    best.isJudged = true;
+    return best;
+  }
+  return null;
+}
+
+function updateNoteMatching() {
+  for (let finger of fingers) {
+    if (finger.isNewClick) CheckNote(finger);
+  }
+}
+
 function updateFingers(deltaTime) {
   syncFingers();
   updateFlickTrigger(deltaTime);
+  updateNoteMatching();
 }
 
 function finishFingerFrame() {
@@ -636,6 +726,10 @@ function retryLevel() {
   level.startDelay = 1.5;
   level.audioStarted = false;
   level.audioRequested = false;
+  for (let note of chartNoteSortByTime) {
+    note.isJudged = false;
+    note.isJudgedForFlick = false;
+  }
   clearFingers();
 }
 
@@ -776,6 +870,7 @@ function gameLoop(now) {
   if (!paused) {
     updatePauseTimer(deltaTime);
     updateLevelTime();
+    updateJudgeLineStates();
     updateFingers(deltaTime);
   }
   drawFrame();
