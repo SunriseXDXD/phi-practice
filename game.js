@@ -54,6 +54,7 @@ let level = {
 
 let settings = {
   speed: 6.0, // 流速
+  dpi: 264, // Screen.dpi
   offset: 0.0, // 谱面延时
   noteScale: 1.0, // 按键缩放
   backgroundAlpha: 0.85, // 背景亮度(?)
@@ -73,6 +74,9 @@ let effectiveAspect = 0;
 let pauseTime = 0;
 let paused = true;
 let lastFrameTime = performance.now();
+let fingers = [];
+let fingerById = new Map();
+let pendingFingerEvents = [];
 
 function readYaml(text) {
   let out = {};
@@ -120,7 +124,6 @@ function inverseLerp(a, b, v) {
 }
 function uiHalfWidth() {
   return 500 * effectiveAspect;
-  return Math.min(500 * 16 / 9, 500 * screenWidth / screenHeight);
 }
 function worldToScreenX(x) {
   return screenWidth / 2 + x * screenHeight / 10;
@@ -514,6 +517,94 @@ function isInsidePauseMenuHitbox(screenX, screenY, worldX) {
   return Math.hypot(screenX - x, screenY - y) <= r;
 }
 
+function clearFingers() {
+  fingers = [];
+  fingerById.clear();
+  pendingFingerEvents = [];
+}
+
+function queueFingerEvent(fingerId, phase, clientX, clientY) {
+  if (paused) return;
+  pendingFingerEvents.push({ fingerId, phase, clientX, clientY });
+}
+
+function syncFingers() {
+  for (let finger of fingers) {
+    finger.isNewClick = false;
+    finger.lastPosition = finger.nowPosition;
+    finger.lastMove = finger.nowMove;
+    finger.nowMove = { x: 0, y: 0 };
+  }
+  for (let event of pendingFingerEvents) {
+    let position = {
+      x: screenToWorldX(event.clientX),
+      y: screenToWorldY(event.clientY)
+    };
+    let finger = fingerById.get(event.fingerId);
+    if (!finger) {
+      finger = {
+        fingerId: event.fingerId,
+        pressed: event.phase != "ended" && event.phase != "canceled",
+        isNewClick: event.phase == "began",
+        isNewFlick: false,
+        stopped: true,
+        lastPosition: position,
+        nowPosition: position,
+        lastMove: { x: 0, y: 0 },
+        nowMove: { x: 0, y: 0 }
+      };
+      fingers.push(finger);
+      fingerById.set(event.fingerId, finger);
+      continue;
+    }
+    finger.nowPosition = position;
+    finger.nowMove = {
+      x: finger.nowPosition.x - finger.lastPosition.x,
+      y: finger.nowPosition.y - finger.lastPosition.y
+    };
+    finger.pressed = event.phase != "ended" && event.phase != "canceled";
+    if (event.phase == "began") finger.isNewClick = true;
+  }
+  pendingFingerEvents = [];
+}
+
+function updateFlickTrigger(deltaTime) {
+  if (deltaTime <= 0) return;
+  let flickJudgeSpeed = 0.06 / 380 * settings.dpi;
+  for (let finger of fingers) {
+    if (!finger.pressed && finger.nowMove.x == 0 && finger.nowMove.y == 0) continue;
+    let lastMoveLength = Math.hypot(finger.lastMove.x, finger.lastMove.y);
+    let flickSpeed = 0;
+    if (lastMoveLength > 0.1) {
+      flickSpeed = (finger.nowMove.x * finger.lastMove.x + finger.nowMove.y * finger.lastMove.y) / lastMoveLength;
+    }
+    flickSpeed = flickSpeed / 60 / deltaTime;
+    if (flickSpeed < flickJudgeSpeed || finger.stopped) {
+      let speed = Math.hypot(finger.nowMove.x, finger.nowMove.y) / 60 / deltaTime;
+      if (speed >= flickJudgeSpeed * 5) {
+        finger.isNewFlick = true;
+        finger.stopped = false;
+      } else {
+        finger.isNewFlick = false;
+        finger.stopped = true;
+      }
+    }
+  }
+}
+
+function updateFingers(deltaTime) {
+  syncFingers();
+  updateFlickTrigger(deltaTime);
+}
+
+function finishFingerFrame() {
+  for (let i = fingers.length - 1; i >= 0; i--) {
+    if (fingers[i].pressed) continue;
+    fingerById.delete(fingers[i].fingerId);
+    fingers.splice(i, 1);
+  }
+}
+
 function pauseLevel() {
   pauseAudio.currentTime = 0;
   pauseAudio.play().catch(() => {});
@@ -523,6 +614,7 @@ function pauseLevel() {
   }
   level.audioStarted = false;
   level.audioRequested = false;
+  clearFingers();
 }
 
 function resumeLevel() {
@@ -530,6 +622,7 @@ function resumeLevel() {
   level.startDelay = 3.0;
   level.audioStarted = false;
   level.audioRequested = false;
+  clearFingers();
 }
 
 function retryLevel() {
@@ -543,6 +636,7 @@ function retryLevel() {
   level.startDelay = 1.5;
   level.audioStarted = false;
   level.audioRequested = false;
+  clearFingers();
 }
 
 function handlePausePointer(event) {
@@ -580,10 +674,35 @@ function handlePointer(event) {
   }
   handlePausePointer(event);
 }
+function handlePointerDown(event) {
+  if (event.pointerType == "touch") return;
+  handlePointer(event);
+  if (event.defaultPrevented) return;
+  if (event.target.setPointerCapture) event.target.setPointerCapture(event.pointerId);
+  queueFingerEvent(`pointer:${event.pointerId}`, "began", event.clientX, event.clientY);
+}
+function handlePointerMove(event) {
+  if (event.pointerType == "touch") return;
+  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
+  queueFingerEvent(`pointer:${event.pointerId}`, "moved", event.clientX, event.clientY);
+}
+function handlePointerUp(event) {
+  if (event.pointerType == "touch") return;
+  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
+  queueFingerEvent(`pointer:${event.pointerId}`, "ended", event.clientX, event.clientY);
+}
+function handlePointerCancel(event) {
+  if (event.pointerType == "touch") return;
+  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
+  queueFingerEvent(`pointer:${event.pointerId}`, "canceled", event.clientX, event.clientY);
+}
 
 function handleTouchStart(event) {
+  let wasPaused = paused;
+  let queued = false;
   for (let i = 0; i < event.changedTouches.length; i++) {
     let touch = event.changedTouches[i];
+    let handledUi = wasPaused || isInsidePauseHitbox(touch.clientX, touch.clientY);
     handlePointer({
       clientX: touch.clientX,
       clientY: touch.clientY,
@@ -591,6 +710,35 @@ function handleTouchStart(event) {
         event.preventDefault();
       }
     });
+    if (!handledUi) {
+      queueFingerEvent(`touch:${touch.identifier}`, "began", touch.clientX, touch.clientY);
+      queued = true;
+    }
+  }
+  if (queued) event.preventDefault();
+}
+function handleTouchMove(event) {
+  if (paused) return;
+  event.preventDefault();
+  for (let i = 0; i < event.changedTouches.length; i++) {
+    let touch = event.changedTouches[i];
+    queueFingerEvent(`touch:${touch.identifier}`, "moved", touch.clientX, touch.clientY);
+  }
+}
+function handleTouchEnd(event) {
+  if (paused) return;
+  event.preventDefault();
+  for (let i = 0; i < event.changedTouches.length; i++) {
+    let touch = event.changedTouches[i];
+    queueFingerEvent(`touch:${touch.identifier}`, "ended", touch.clientX, touch.clientY);
+  }
+}
+function handleTouchCancel(event) {
+  if (paused) return;
+  event.preventDefault();
+  for (let i = 0; i < event.changedTouches.length; i++) {
+    let touch = event.changedTouches[i];
+    queueFingerEvent(`touch:${touch.identifier}`, "canceled", touch.clientX, touch.clientY);
   }
 }
 
@@ -628,18 +776,27 @@ function gameLoop(now) {
   if (!paused) {
     updatePauseTimer(deltaTime);
     updateLevelTime();
+    updateFingers(deltaTime);
   }
   drawFrame();
+  finishFingerFrame();
   requestAnimationFrame(gameLoop);
 }
 
 window.addEventListener("resize", resizeCanvas);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", resizeCanvas);
-canvas.addEventListener("pointerdown", handlePointer);
+canvas.addEventListener("pointerdown", handlePointerDown);
+canvas.addEventListener("pointermove", handlePointerMove);
+canvas.addEventListener("pointerup", handlePointerUp);
+canvas.addEventListener("pointercancel", handlePointerCancel);
 canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
+canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+canvas.addEventListener("touchcancel", handleTouchCancel, { passive: false });
 zipInput.addEventListener("change", async () => {
   let file = zipInput.files[0];
   if (file) {
+    clearFingers();
     level.info = {};
     level.chart = null;
     level.nowTime = -3;
@@ -658,7 +815,6 @@ zipInput.addEventListener("change", async () => {
     if (infoFile) {
       let infoText = await infoFile.async("string");
       level.info = readYaml(infoText);
-      console.log(level.info);
     }
     level.info.chart = level.info.chart || "chart.json";
     level.info.charter = level.info.charter || "UK";
