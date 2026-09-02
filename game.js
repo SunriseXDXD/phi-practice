@@ -34,11 +34,7 @@ const retryIcon = new Image();
 retryIcon.src = "assets/Retry.png";
 const resumeIcon = new Image();
 resumeIcon.src = "assets/Resume.png";
-const zipInput = document.createElement("input");
-zipInput.type = "file";
-zipInput.accept = ".zip";
-zipInput.style.display = "none";
-document.body.appendChild(zipInput);
+const zipInput = document.getElementById("zipInput");
 
 let level = {
   zip: null,
@@ -389,28 +385,6 @@ function drawPauseBarButton(icon, x, y) {
   ctx.drawImage(icon, centerX - width / 2, centerY - height / 2, width, height);
 }
 
-function drawLoadButton() {
-  let x = uiToScreenX(0);
-  let y = uiToScreenY(-180);
-  let width = 180 * screenHeight / 1000;
-  let height = 60 * screenHeight / 1000;
-  let fontSize = 30 * screenHeight / 1000;
-  ctx.save();
-  ctx.strokeStyle = "#fff";
-  ctx.lineWidth = 2 * screenHeight / 1000;
-  ctx.strokeRect(x - width / 2, y - height / 2, width, height);
-  ctx.font = `${fontSize}px "Phigros UI"`;
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("Load Zip", x, y);
-  let file = zipInput.files[0];
-  if (file) {
-    ctx.fillText(file.name, uiToScreenX(0), uiToScreenY(-240));
-  }
-  ctx.restore();
-}
-
 function drawPauseBar() {
   ctx.save();
   ctx.fillStyle = "#000";
@@ -418,7 +392,6 @@ function drawPauseBar() {
   drawPauseBarButton(backIcon, -216, 0);
   drawPauseBarButton(retryIcon, 0, 0);
   drawPauseBarButton(resumeIcon, 216, 0);
-  drawLoadButton();
   ctx.restore();
 }
 
@@ -501,6 +474,7 @@ function resizeCanvas() {
 }
 
 function drawFrame() {
+  document.body.classList.toggle("paused", paused);
   ctx.clearRect(0, 0, screenWidth, screenHeight);
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, screenWidth, screenHeight);
@@ -540,17 +514,6 @@ function isInsidePauseMenuHitbox(screenX, screenY, worldX) {
   return Math.hypot(screenX - x, screenY - y) <= r;
 }
 
-function isInsideLoadHitbox(screenX, screenY) {
-  let x = uiToScreenX(0);
-  let y = uiToScreenY(-180);
-  let width = 180 * screenHeight / 1000;
-  let height = 60 * screenHeight / 1000;
-  return (
-    Math.abs(screenX - x) <= width / 2 &&
-    Math.abs(screenY - y) <= height / 2
-  );
-}
-
 function pauseLevel() {
   pauseAudio.currentTime = 0;
   pauseAudio.play().catch(() => {});
@@ -583,11 +546,6 @@ function handlePausePointer(event) {
 
 function handlePauseMenuPointer(event) {
   event.preventDefault();
-  if (isInsideLoadHitbox(event.clientX, event.clientY)) {
-    zipInput.value = "";
-    zipInput.click();
-    return;
-  }
   if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 2) && level.zip) {
     pauseTime = 0;
     resumeLevel();
