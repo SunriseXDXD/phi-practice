@@ -166,6 +166,7 @@ function prepareChart(chart) {
       note.side = 0;
       note.noteIndex = noteIndex;
       note.isJudged = false;
+      note.isJudgedForFlick = false;
       notes.push(note);
     }
     for (let noteIndex = 0; noteIndex < line.notesBelow.length; noteIndex++) {
@@ -177,6 +178,7 @@ function prepareChart(chart) {
       note.side = 1;
       note.noteIndex = noteIndex;
       note.isJudged = false;
+      note.isJudgedForFlick = false;
       notes.push(note);
     }
     for (let i = 0; i < line.speedEvents.length; i++) {
@@ -622,14 +624,15 @@ function CheckNote(finger) {
     if (note.realTime >= level.nowTime + badTimeRange) break;
     end++;
   }
-  if (end < 0) return null;
-
   let start = end;
   while (start > 0) {
     let note = chartNoteSortByTime[start - 1];
     if (note.realTime <= level.nowTime - goodTimeRange) break;
     start--;
   }
+
+  if (start < 0) return null;
+  if (end < start) return null;
 
   for (let i = start; i <= end; i++) {
     let note = chartNoteSortByTime[i];
@@ -675,9 +678,63 @@ function CheckNote(finger) {
   return null;
 }
 
+function CheckFlick(finger) {
+  let best = null;
+  let bestAbsDt = 10000;
+
+  let end = -1;
+  while (end + 1 < chartNoteSortByTime.length) {
+    let note = chartNoteSortByTime[end + 1];
+    if (note.realTime >= level.nowTime + 1.75 * perfectTimeRange) break;
+    end++;
+  }
+  let start = end;
+  while (start > 0) {
+    let note = chartNoteSortByTime[start - 1];
+    if (note.realTime <= level.nowTime - 1.75 * perfectTimeRange) break;
+    start--;
+  }
+
+  if (start < 0) return;
+  if (end < start) return;
+
+  for (let i = start; i <= end; i++) {
+    let note = chartNoteSortByTime[i];
+    if (note.type != 4) continue;
+    if (note.isJudgedForFlick) continue;
+
+    let dt = note.realTime - level.nowTime;
+    if (dt >= bestAbsDt + 0.01) continue;
+
+    let state = lineStates[Math.floor(note.judgeLineIndex / 2)];
+    if (!state) continue;
+    let position = fingerOnLine(finger, state);
+    let dx = Math.abs(note.positionX - position.x);
+    if (dx >= 2.1) continue;
+
+    if (best != null) {
+      if (Math.abs(best.realTime - note.realTime) > 0.01) continue;
+      let bestState = lineStates[Math.floor(best.judgeLineIndex / 2)];
+      if (!bestState) continue;
+      let bestPosition = fingerOnLine(finger, bestState);
+      let noteMetric = Math.abs(note.positionX - position.x) + Math.abs(position.y / 2.2);
+      let bestMetric = Math.abs(best.positionX - bestPosition.x) + Math.abs(bestPosition.y / 2.2);
+      if (noteMetric >= bestMetric) continue;
+    }
+
+    best = note;
+    bestAbsDt = Math.abs(dt);
+  }
+
+  if (best == null) return;
+  best.isJudgedForFlick = true;
+  finger.isNewFlick = false;
+}
+
 function updateNoteMatching() {
   for (let finger of fingers) {
     if (finger.isNewClick) CheckNote(finger);
+    if (finger.isNewFlick) CheckFlick(finger);
   }
 }
 
