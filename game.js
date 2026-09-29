@@ -775,6 +775,11 @@ function drawSongsLevel(songsLevel) {
 }
 
 function resizeCanvas() {
+  let viewport = window.visualViewport;
+  let viewportWidth = viewport ? viewport.width : window.innerWidth;
+  let viewportHeight = viewport ? viewport.height : window.innerHeight;
+  canvas.style.width = `${viewportWidth}px`;
+  canvas.style.height = `${viewportHeight}px`;
   let rect = canvas.getBoundingClientRect();
   deviceScale = Math.max(1, window.devicePixelRatio || 1);
   screenWidth = Math.max(1, rect.width);

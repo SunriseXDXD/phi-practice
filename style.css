@@ -24,7 +24,8 @@ body {
 }
 #canvas {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
   display: block;
   width: 100vw;
   height: 100vh;
