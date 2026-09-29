@@ -4,8 +4,18 @@ const pauseIcon = new Image();
 pauseIcon.src = "assets/Pause.png";
 const noteRing = new Image();
 noteRing.src = "assets/NoteRing.png";
-const pauseAudio = new Audio("assets/Tap6.wav");
-pauseAudio.preload = "auto";
+const audioContext = new AudioContext({ latencyHint: "interactive" });
+let pauseAudioBuffer = null;
+fetch("assets/Tap6.wav")
+  .then((response) => {
+    if (!response.ok) throw new Error(`Pause sound: HTTP ${response.status}`);
+    return response.arrayBuffer();
+  })
+  .then((data) => audioContext.decodeAudioData(data))
+  .then((buffer) => {
+    pauseAudioBuffer = buffer;
+  })
+  .catch((error) => console.error("Could not load pause sound:", error));
 const tapNote = new Image();
 tapNote.src = "assets/Tap2.png";
 const tapNoteHL = new Image();
@@ -45,8 +55,10 @@ let level = {
   startDelay: 1.5,
   audioTime: 0,
   audioStarted: false,
-  audioRequested: false,
   music: null,
+  musicSource: null,
+  musicStartTime: 0,
+  musicOffset: 0,
   illustration: null, // not used yet
   illustrationBlur: null,
   illustrationLowRes: null // not used yet
@@ -187,11 +199,8 @@ async function loadZipContent(path, type) {
     return JSON.parse(text);
   }
   if (type == "audio") {
-    let blob = await file.async("blob");
-    let audio = new Audio(URL.createObjectURL(blob));
-    audio.preload = "auto";
-    audio.load();
-    return audio;
+    let data = await file.async("arraybuffer");
+    return audioContext.decodeAudioData(data);
   }
   if (type == "image") {
     let blob = await file.async("blob");
@@ -1055,36 +1064,33 @@ function finishFingerFrame() {
 }
 
 function pauseLevel() {
-  pauseAudio.currentTime = 0;
-  pauseAudio.play().catch(() => {});
-  if (level.music) {
-    level.audioTime = level.music.currentTime;
-    level.music.pause();
-  }
-  level.audioStarted = false;
-  level.audioRequested = false;
+  stopMusic();
   clearFingers();
+  playPauseSound();
+}
+
+function playPauseSound() {
+  if (!pauseAudioBuffer) return;
+  let source = audioContext.createBufferSource();
+  source.buffer = pauseAudioBuffer;
+  source.connect(audioContext.destination);
+  source.onended = () => source.disconnect();
+  source.start();
 }
 
 function resumeLevel() {
   level.startTime = -1;
   level.startDelay = 3.0;
   level.audioStarted = false;
-  level.audioRequested = false;
   clearFingers();
 }
 
 function retryLevel() {
-  if (level.music) {
-    level.music.pause();
-    level.music.currentTime = 0;
-  }
+  stopMusic();
   level.audioTime = 0;
   level.nowTime = 0;
   level.startTime = -1;
   level.startDelay = 1.5;
-  level.audioStarted = false;
-  level.audioRequested = false;
   resetNoteControls();
   clearFingers();
 }
@@ -1103,13 +1109,13 @@ function handlePausePointer(event) {
 
 function handlePauseMenuPointer(event) {
   event.preventDefault();
-  if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 0) && level.zip) {
+  if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 0) && level.chart && level.music) {
     pauseTime = 0;
     retryLevel();
     paused = false;
     return;
   }
-  if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 2) && level.zip) {
+  if (isInsidePauseMenuHitbox(event.clientX, event.clientY, 2) && level.chart && level.music) {
     pauseTime = 0;
     resumeLevel();
     paused = false;
@@ -1118,6 +1124,7 @@ function handlePauseMenuPointer(event) {
 }
 
 function handlePointer(event) {
+  unlockAudio();
   if (paused) {
     handlePauseMenuPointer(event);
     return;
@@ -1197,24 +1204,50 @@ function updatePauseTimer(deltaTime) {
   pauseTime = Math.max(0, pauseTime - deltaTime);
 }
 
+function unlockAudio() {
+  if (audioContext.state != "running") {
+    audioContext.resume().catch((error) => console.error("Could not resume audio:", error));
+  }
+}
+
+function requestMusicPlayback() {
+  if (!level.music || level.musicSource) return;
+  let source = audioContext.createBufferSource();
+  source.buffer = level.music;
+  source.connect(audioContext.destination);
+  source.onended = () => source.disconnect();
+  // Buffer sources have no playback-position property; retain their clock anchor.
+  level.musicStartTime = Math.max(audioContext.currentTime, level.startTime);
+  level.musicOffset = level.audioTime;
+  source.start(level.musicStartTime, level.musicOffset);
+  level.musicSource = source;
+}
+
+function getMusicTime() {
+  if (!level.musicSource) return level.audioTime;
+  return Math.min(level.music.duration,
+    level.musicOffset + Math.max(0, audioContext.currentTime - level.musicStartTime));
+}
+
+function stopMusic() {
+  if (level.musicSource) {
+    level.audioTime = getMusicTime();
+    level.musicSource.stop();
+    level.musicSource.disconnect();
+    level.musicSource = null;
+  }
+  level.audioStarted = false;
+}
+
 function updateLevelTime() {
   if (!level.chart || !level.music) return;
-  let time = performance.now() / 1000;
+  let time = audioContext.currentTime;
   if (level.startTime < 0) level.startTime = time + level.startDelay;
-  if (!level.audioStarted && !level.audioRequested && time >= level.startTime) {
-    level.music.currentTime = level.audioTime;
-    level.audioRequested = true;
-    level.music.play()
-      .then(() => {
-        level.audioStarted = true;
-      })
-      .catch((error) => {
-        level.audioRequested = false;
-        console.log("music play failed:", error);
-      });
-  }
+  if (!level.musicSource && time >= level.startTime - 1.0) requestMusicPlayback();
+  level.audioStarted = !!level.musicSource && audioContext.state == "running" &&
+    time >= level.musicStartTime;
   if (level.audioStarted) {
-    level.audioTime = level.music.currentTime;
+    level.audioTime = getMusicTime();
     level.nowTime = level.audioTime - (level.chart.offset + settings.offset);
     if (level.nowTime < 0) level.nowTime = 0;
   }
@@ -1227,8 +1260,12 @@ function gameLoop(now) {
     updatePauseTimer(deltaTime);
     updateLevelTime();
     updateJudgeLineStates();
-    updateFingers(deltaTime);
-    updateNoteControls();
+    if (level.audioStarted) {
+      updateFingers(deltaTime);
+      updateNoteControls();
+    } else {
+      syncFingers();
+    }
   }
   drawFrame();
   finishFingerFrame();
@@ -1248,6 +1285,10 @@ canvas.addEventListener("touchcancel", handleTouchCancel, { passive: false });
 zipInput.addEventListener("change", async () => {
   let file = zipInput.files[0];
   if (file) {
+    unlockAudio();
+    stopMusic();
+    paused = true;
+    pauseTime = 0;
     clearFingers();
     level.info = {};
     level.chart = null;
@@ -1256,8 +1297,6 @@ zipInput.addEventListener("change", async () => {
     level.startDelay = 1.5;
     level.audioTime = 0;
     level.audioStarted = false;
-    level.audioRequested = false;
-    if (level.music) level.music.pause();
     level.music = null;
     level.illustration = null;
     level.illustrationBlur = null;
@@ -1283,7 +1322,11 @@ zipInput.addEventListener("change", async () => {
     level.info.previewEnd = Number(level.info.previewEnd || level.info.previewStart + 15.0);
     level.chart = await loadZipContent(level.info.chart, "json");
     prepareChart(level.chart);
-    level.music = await loadZipContent(level.info.music, "audio");
+    level.music = await loadZipContent(level.info.music, "audio")
+      .catch((error) => {
+        console.error("Could not decode music:", error);
+        return null;
+      });
     level.illustration = await loadZipContent(level.info.illustration, "image");
     level.illustrationBlur = await loadZipContent(level.info.illustrationBlur, "image");
     level.illustrationLowRes = await loadZipContent(level.info.illustrationLowRes, "image");
