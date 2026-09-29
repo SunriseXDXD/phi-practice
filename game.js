@@ -84,6 +84,86 @@ let fingers = [];
 let fingerById = new Map();
 let pendingFingerEvents = [];
 
+class ScoreControl {
+  constructor() {
+    this.reset();
+  }
+
+  reset(totalNotes = 0) {
+    this.totalNotes = totalNotes;
+    this.score = 0;
+    this.percent = 0;
+    this.scoreOfNote = 0;
+    this.combo = 0;
+    this.maxCombo = 0;
+    this.perfect = 0;
+    this.good = 0;
+    this.bad = 0;
+    this.miss = 0;
+    this.early = 0;
+    this.late = 0;
+    this.isAllPerfect = true;
+    this.isFullCombo = true;
+  }
+
+  updateScore() {
+    if (this.totalNotes <= 0) return;
+    this.scoreOfNote = 900000 * (this.perfect + 0.65 * this.good) / this.totalNotes;
+    this.score = this.scoreOfNote + 100000 * this.maxCombo / this.totalNotes;
+    this.percent = this.scoreOfNote / 900000 * 100;
+  }
+
+  getScoreText() {
+    return String(Math.floor(this.score + 0.5)).padStart(7, "0");
+  }
+
+  recordResult(note, result, judgeTime = 0) {
+    if (note.judgeResult) return false;
+    note.judgeResult = result;
+    note.judgeTime = judgeTime;
+    return true;
+  }
+
+  Perfect(note, judgeTime = 0) {
+    if (!this.recordResult(note, "Perfect", judgeTime)) return;
+    this.perfect++;
+    this.combo++;
+    this.maxCombo = Math.max(this.maxCombo, this.combo);
+    this.updateScore();
+  }
+
+  Good(note, judgeTime) {
+    if (!this.recordResult(note, "Good", judgeTime)) return;
+    this.good++;
+    this.combo++;
+    this.isAllPerfect = false;
+    if (judgeTime <= 0) this.early++;
+    else this.late++;
+    this.maxCombo = Math.max(this.maxCombo, this.combo);
+    this.updateScore();
+  }
+
+  Bad(note, judgeTime = 0) {
+    if (!this.recordResult(note, "Bad", judgeTime)) return;
+    this.bad++;
+    this.combo = 0;
+    this.isAllPerfect = false;
+    this.isFullCombo = false;
+    this.updateScore();
+  }
+
+  Miss(note) {
+    if (!this.recordResult(note, "Miss")) return;
+    this.miss++;
+    this.combo = 0;
+    this.isAllPerfect = false;
+    this.isFullCombo = false;
+    this.updateScore();
+  }
+}
+
+let scoreControl = new ScoreControl();
+
 function readYaml(text) {
   let out = {};
   for (let line of text.split(/\r?\n/)) {
@@ -165,7 +245,7 @@ class ClickControl {
 
     if (!this.isJudged) {
       if (dt < -goodTimeRange) {
-        this.note.judgeResult = "Miss";
+        scoreControl.Miss(this.note);
         this.note.isJudged = true;
         return true;
       }
@@ -173,11 +253,11 @@ class ClickControl {
     }
 
     if (Math.abs(dt) < perfectTimeRange) {
-      this.note.judgeResult = "Perfect";
+      scoreControl.Perfect(this.note, -dt);
     } else if (Math.abs(dt) < goodTimeRange) {
-      this.note.judgeResult = "Good";
+      scoreControl.Good(this.note, -dt);
     } else {
-      this.note.judgeResult = "Bad";
+      scoreControl.Bad(this.note, -dt);
     }
     this.note.isJudged = true;
     return true;
@@ -192,6 +272,7 @@ class HoldControl {
     this.judged = false;
     this.judgeOver = false;
     this.isPerfect = false;
+    this.judgeTime = 0;
     this.safeFrame = 2;
   }
 
@@ -203,7 +284,7 @@ class HoldControl {
     if (!this.judged && !this.missed) {
       if (!this.isJudged) {
         if (dt < -goodTimeRange) {
-          this.note.judgeResult = "Miss";
+          scoreControl.Miss(this.note);
           this.note.isJudged = true;
           this.missed = true;
           return true;
@@ -212,9 +293,11 @@ class HoldControl {
         if (Math.abs(dt) < perfectTimeRange) {
           this.judged = true;
           this.isPerfect = true;
+          this.judgeTime = -dt;
         } else if (Math.abs(dt) < goodTimeRange) {
           this.judged = true;
           this.isPerfect = false;
+          this.judgeTime = -dt;
         }
       }
     }
@@ -235,7 +318,7 @@ class HoldControl {
       if (isHolding) {
         this.safeFrame = 2;
       } else if (this.safeFrame < 0) {
-        this.note.judgeResult = "Miss";
+        scoreControl.Miss(this.note);
         this.note.isJudged = true;
         this.missed = true;
         return true;
@@ -244,7 +327,8 @@ class HoldControl {
       }
 
       if (tailTime - level.nowTime < badTimeRange) {
-        this.note.judgeResult = this.isPerfect ? "Perfect" : "Good";
+        if (this.isPerfect) scoreControl.Perfect(this.note, this.judgeTime);
+        else scoreControl.Good(this.note, this.judgeTime);
         this.note.isJudged = true;
         this.judgeOver = true;
         return true;
@@ -253,7 +337,7 @@ class HoldControl {
 
     if (level.nowTime > tailTime + 0.25) {
       if (!this.judged && !this.missed && !this.judgeOver) {
-        this.note.judgeResult = "Miss";
+        scoreControl.Miss(this.note);
         this.note.isJudged = true;
       }
       return true;
@@ -286,7 +370,7 @@ class DragControl {
 
     if (!this.isJudged) {
       if (dt < -0.1) {
-        this.note.judgeResult = "Miss";
+        scoreControl.Miss(this.note);
         this.note.isJudged = true;
         return true;
       }
@@ -294,7 +378,7 @@ class DragControl {
 
     if (this.isJudged) {
       if (dt < 0.005) {
-        this.note.judgeResult = "Perfect";
+        scoreControl.Perfect(this.note, -dt);
         this.note.isJudged = true;
         return true;
       }
@@ -313,7 +397,7 @@ class FlickControl {
 
     if (!this.note.isJudgedForFlick) {
       if (dt < -1.75 * perfectTimeRange) {
-        this.note.judgeResult = "Miss";
+        scoreControl.Miss(this.note);
         this.note.isJudged = true;
         return true;
       }
@@ -321,7 +405,7 @@ class FlickControl {
 
     if (this.note.isJudgedForFlick) {
       if (dt < 0.005) {
-        this.note.judgeResult = "Perfect";
+        scoreControl.Perfect(this.note, -dt);
         this.note.isJudged = true;
         return true;
       }
@@ -340,10 +424,12 @@ function createNoteControl(note) {
 
 function resetNoteControls() {
   noteControls = [];
+  scoreControl.reset(chartNoteSortByTime.length);
   for (let note of chartNoteSortByTime) {
     note.isJudged = false;
     note.isJudgedForFlick = false;
     note.judgeResult = null;
+    note.judgeTime = null;
     note.control = createNoteControl(note);
     if (note.control) noteControls.push(note.control);
   }
@@ -365,6 +451,7 @@ function prepareChart(chart) {
       note.isJudged = false;
       note.isJudgedForFlick = false;
       note.judgeResult = null;
+      note.judgeTime = null;
       notes.push(note);
     }
     for (let noteIndex = 0; noteIndex < line.notesBelow.length; noteIndex++) {
@@ -378,6 +465,7 @@ function prepareChart(chart) {
       note.isJudged = false;
       note.isJudgedForFlick = false;
       note.judgeResult = null;
+      note.judgeTime = null;
       notes.push(note);
     }
     for (let i = 0; i < line.speedEvents.length; i++) {
@@ -714,9 +802,11 @@ function drawFrame() {
   }
   drawPause();
   drawPauseRing();
-  drawScore("0000000");
-  drawCombo("99");
-  drawComboText();
+  drawScore(scoreControl.getScoreText());
+  if (scoreControl.combo >= 3) {
+    drawCombo(scoreControl.combo);
+    drawComboText();
+  }
   drawSongsName(level.info.name);
   drawSongsLevel(level.info.level);
   if (paused) drawPauseBar();
