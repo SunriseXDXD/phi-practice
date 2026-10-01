@@ -45,6 +45,13 @@ retryIcon.src = "assets/Retry.png";
 const resumeIcon = new Image();
 resumeIcon.src = "assets/Resume.png";
 const zipInput = document.getElementById("zipInput");
+const settingsButton = document.getElementById("settingsButton");
+const settingsDialog = document.getElementById("settingsDialog");
+const noteSpeedInput = document.getElementById("noteSpeed");
+const globalSpeedInput = document.getElementById("globalSpeed");
+const musicSeekInput = document.getElementById("musicSeek");
+const seekTimeOutput = document.getElementById("seekTime");
+const musicDurationText = document.getElementById("musicDuration");
 
 let level = {
   zip: null,
@@ -59,13 +66,17 @@ let level = {
   musicSource: null,
   musicStartTime: 0,
   musicOffset: 0,
+  musicPlaybackRate: 1,
   illustration: null, // not used yet
   illustrationBlur: null,
   illustrationLowRes: null // not used yet
 };
 
 let settings = {
-  speed: 6.0, // 流速
+  speed: 9.0, // 流速
+  globalSpeed: 1.0,
+  showAccuracy: true,
+  showJudgement: true,
   dpi: 264, // Screen.dpi
   offset: 0.0, // 谱面延时
   noteScale: 1.0, // 按键缩放
@@ -104,7 +115,8 @@ class ScoreControl {
   reset(totalNotes = 0) {
     this.totalNotes = totalNotes;
     this.score = 0;
-    this.percent = 0;
+    this.percent = 100;
+    this.lastJudgement = null;
     this.scoreOfNote = 0;
     this.combo = 0;
     this.maxCombo = 0;
@@ -122,7 +134,8 @@ class ScoreControl {
     if (this.totalNotes <= 0) return;
     this.scoreOfNote = 900000 * (this.perfect + 0.65 * this.good) / this.totalNotes;
     this.score = this.scoreOfNote + 100000 * this.maxCombo / this.totalNotes;
-    this.percent = this.scoreOfNote / 900000 * 100;
+    let judgedNotes = this.perfect + this.good + this.bad + this.miss;
+    this.percent = judgedNotes > 0 ? (this.perfect + 0.65 * this.good) / judgedNotes * 100 : 100;
   }
 
   getScoreText() {
@@ -133,6 +146,12 @@ class ScoreControl {
     if (note.judgeResult) return false;
     note.judgeResult = result;
     note.judgeTime = judgeTime;
+    this.lastJudgement = {
+      result,
+      // Convert chart seconds to actual milliseconds at the time of the hit.
+      milliseconds: Math.round(judgeTime / (note.judgePlaybackRate || settings.globalSpeed) * 1000),
+      time: level.nowTime
+    };
     return true;
   }
 
@@ -303,10 +322,12 @@ class HoldControl {
           this.judged = true;
           this.isPerfect = true;
           this.judgeTime = -dt;
+          this.note.judgePlaybackRate = settings.globalSpeed;
         } else if (Math.abs(dt) < goodTimeRange) {
           this.judged = true;
           this.isPerfect = false;
           this.judgeTime = -dt;
+          this.note.judgePlaybackRate = settings.globalSpeed;
         }
       }
     }
@@ -431,17 +452,21 @@ function createNoteControl(note) {
   return null;
 }
 
-function resetNoteControls() {
+function resetNoteControls(fromTime = -Infinity) {
   noteControls = [];
-  scoreControl.reset(chartNoteSortByTime.length);
+  let remainingNotes = 0;
   for (let note of chartNoteSortByTime) {
-    note.isJudged = false;
-    note.isJudgedForFlick = false;
-    note.judgeResult = null;
+    let skipped = note.realTime < fromTime;
+    note.isJudged = skipped;
+    note.isJudgedForFlick = skipped;
+    note.judgeResult = skipped ? "Skipped" : null;
     note.judgeTime = null;
-    note.control = createNoteControl(note);
+    note.judgePlaybackRate = null;
+    note.control = skipped ? null : createNoteControl(note);
     if (note.control) noteControls.push(note.control);
+    if (!skipped) remainingNotes++;
   }
+  scoreControl.reset(remainingNotes);
 }
 
 function prepareChart(chart) {
@@ -731,6 +756,34 @@ function drawScore(score) {
   ctx.restore();
 }
 
+function drawPercent(percent) {
+  let x = uiToScreenX(651.5 + 400 / 2 + uiHalfWidth() - 500 * 16 / 9);
+  let y = uiToScreenY(400);
+  let fontSize = 28 * screenHeight / 1000;
+  ctx.save();
+  ctx.font = `${fontSize}px "Phigros UI"`;
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.fillText(`ACC ${percent.toFixed(2)}%`, x, y);
+  ctx.restore();
+}
+
+function drawJudgement() {
+  let judgement = scoreControl.lastJudgement;
+  if (!judgement || level.nowTime - judgement.time > 1.2) return;
+  let timing = judgement.milliseconds;
+  let text = judgement.result == "Miss" ? "Miss" :
+    `${judgement.result} ${timing >= 0 ? "+" : ""}${timing} ms`;
+  ctx.save();
+  ctx.font = `${28 * screenHeight / 1000}px "Phigros UI"`;
+  ctx.fillStyle = { Perfect: "#ffe8a3", Good: "#a5d8ff", Bad: "#ffb38a", Miss: "#ff8080" }[judgement.result];
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, uiToScreenX(0), uiToScreenY(355));
+  ctx.restore();
+}
+
 function drawCombo(combo) {
   let x = uiToScreenX(0);
   let y = uiToScreenY(452);
@@ -796,6 +849,8 @@ function resizeCanvas() {
   visibleWidth = Math.min(screenWidth, screenHeight * 16 / 9);
   sideMaskWidth = (screenWidth - visibleWidth) / 2;
   effectiveAspect = visibleWidth / screenHeight;
+  settingsButton.style.left = `${Math.max(24, sideMaskWidth + 50.589 * screenHeight / 1000)}px`;
+  settingsButton.style.top = `${Math.max(24, 55.7 * screenHeight / 1000)}px`;
   canvas.width = Math.max(1, Math.round(screenWidth * deviceScale));
   canvas.height = Math.max(1, Math.round(screenHeight * deviceScale));
   ctx.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
@@ -817,6 +872,8 @@ function drawFrame() {
   drawPause();
   drawPauseRing();
   drawScore(scoreControl.getScoreText());
+  if (settings.showAccuracy) drawPercent(scoreControl.percent);
+  if (settings.showJudgement) drawJudgement();
   if (scoreControl.combo >= 3) {
     drawCombo(scoreControl.combo);
     drawComboText();
@@ -1065,6 +1122,7 @@ function finishFingerFrame() {
 
 function pauseLevel() {
   stopMusic();
+  updateSeekBar();
   clearFingers();
   playPauseSound();
 }
@@ -1093,6 +1151,37 @@ function retryLevel() {
   level.startDelay = 1.5;
   resetNoteControls();
   clearFingers();
+  updateSeekBar();
+}
+
+function formatMusicTime(seconds) {
+  let wholeSeconds = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, "0")}`;
+}
+
+function updateSeekBar() {
+  let duration = level.music ? level.music.duration : 0;
+  musicSeekInput.disabled = !level.chart || duration <= 0;
+  musicSeekInput.max = duration;
+  musicSeekInput.value = level.audioTime;
+  seekTimeOutput.value = formatMusicTime(level.audioTime);
+  musicDurationText.textContent = formatMusicTime(duration);
+  musicSeekInput.setAttribute("aria-valuetext", `${formatMusicTime(level.audioTime)} / ${formatMusicTime(duration)}`);
+}
+
+function seekLevel(time) {
+  if (!paused || !level.chart || !level.music || !Number.isFinite(time)) return;
+  stopMusic();
+  level.audioTime = Math.max(0, Math.min(time, level.music.duration));
+  level.nowTime = Math.max(0, level.audioTime - (level.chart.offset + settings.offset));
+  level.startTime = -1;
+  pauseTime = 0;
+  // Start a fresh practice section; earlier notes (including overlapping holds)
+  // are skipped without counting as misses. Seeking back makes them playable again.
+  resetNoteControls(level.audioTime === 0 ? -Infinity : level.nowTime);
+  clearFingers();
+  updateJudgeLineStates();
+  updateSeekBar();
 }
 
 function handlePausePointer(event) {
@@ -1124,6 +1213,7 @@ function handlePauseMenuPointer(event) {
 }
 
 function handlePointer(event) {
+  if (settingsDialog.open) return;
   unlockAudio();
   if (paused) {
     handlePauseMenuPointer(event);
@@ -1214,6 +1304,8 @@ function requestMusicPlayback() {
   if (!level.music || level.musicSource) return;
   let source = audioContext.createBufferSource();
   source.buffer = level.music;
+  level.musicPlaybackRate = settings.globalSpeed;
+  source.playbackRate.value = level.musicPlaybackRate;
   source.connect(audioContext.destination);
   source.onended = () => source.disconnect();
   // Buffer sources have no playback-position property; retain their clock anchor.
@@ -1226,7 +1318,7 @@ function requestMusicPlayback() {
 function getMusicTime() {
   if (!level.musicSource) return level.audioTime;
   return Math.min(level.music.duration,
-    level.musicOffset + Math.max(0, audioContext.currentTime - level.musicStartTime));
+    level.musicOffset + Math.max(0, audioContext.currentTime - level.musicStartTime) * level.musicPlaybackRate);
 }
 
 function stopMusic() {
@@ -1242,7 +1334,7 @@ function stopMusic() {
 function updateLevelTime() {
   if (!level.chart || !level.music) return;
   let time = audioContext.currentTime;
-  if (level.startTime < 0) level.startTime = time + level.startDelay;
+  if (level.startTime < 0) level.startTime = time + level.startDelay / settings.globalSpeed;
   if (!level.musicSource && time >= level.startTime - 1.0) requestMusicPlayback();
   level.audioStarted = !!level.musicSource && audioContext.state == "running" &&
     time >= level.musicStartTime;
@@ -1272,6 +1364,46 @@ function gameLoop(now) {
   requestAnimationFrame(gameLoop);
 }
 
+settingsButton.addEventListener("click", () => {
+  if (!paused) return;
+  if (settingsDialog.open) settingsDialog.close();
+  else settingsDialog.show();
+  syncSettingsPanel();
+});
+function syncSettingsPanel() {
+  let open = settingsDialog.open;
+  document.body.classList.toggle("settings-open", open);
+  settingsButton.setAttribute("aria-expanded", String(open));
+  for (let element of [canvas, zipInput, document.getElementById("pauseSeek")]) {
+    element.inert = open;
+  }
+  if (!open) settingsButton.focus();
+}
+settingsDialog.addEventListener("close", syncSettingsPanel);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && settingsDialog.open) {
+    settingsDialog.close();
+    syncSettingsPanel();
+  }
+});
+musicSeekInput.addEventListener("input", () => {
+  seekLevel(Number(musicSeekInput.value));
+});
+noteSpeedInput.addEventListener("input", () => {
+  settings.speed = Number(noteSpeedInput.value);
+  document.getElementById("noteSpeedValue").value = settings.speed.toFixed(1);
+});
+globalSpeedInput.addEventListener("input", () => {
+  settings.globalSpeed = Number(globalSpeedInput.value);
+  document.getElementById("globalSpeedValue").value = `${settings.globalSpeed.toFixed(2)}×`;
+});
+document.getElementById("showAccuracy").addEventListener("change", (event) => {
+  settings.showAccuracy = event.target.checked;
+});
+document.getElementById("showJudgement").addEventListener("change", (event) => {
+  settings.showJudgement = event.target.checked;
+});
+
 window.addEventListener("resize", resizeCanvas);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", resizeCanvas);
 canvas.addEventListener("pointerdown", handlePointerDown);
@@ -1298,6 +1430,7 @@ zipInput.addEventListener("change", async () => {
     level.audioTime = 0;
     level.audioStarted = false;
     level.music = null;
+    updateSeekBar();
     level.illustration = null;
     level.illustrationBlur = null;
     level.illustrationLowRes = null;
@@ -1330,6 +1463,7 @@ zipInput.addEventListener("change", async () => {
     level.illustration = await loadZipContent(level.info.illustration, "image");
     level.illustrationBlur = await loadZipContent(level.info.illustrationBlur, "image");
     level.illustrationLowRes = await loadZipContent(level.info.illustrationLowRes, "image");
+    updateSeekBar();
   }
 });
 resizeCanvas();
