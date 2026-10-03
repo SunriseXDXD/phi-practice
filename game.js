@@ -1,3 +1,172 @@
+const BlockAreaEasing = (type, t) => {
+  t = Math.max(0, Math.min(1, t));
+  if (type === 1) return 1 - Math.cos(t * Math.PI / 2);
+  if (type === 2) return Math.sin(t * Math.PI / 2);
+  if (type === 3) return (1 - Math.cos(t * Math.PI)) / 2;
+  if (type >= 4 && type <= 15) {
+    const power = 2 + Math.floor((type - 4) / 3);
+    const mode = (type - 4) % 3;
+    if (mode === 0) return t ** power;
+    if (mode === 1) return 1 - (1 - t) ** power;
+    return t < 0.5 ? (2 * t) ** power / 2 : 1 - (2 * (1 - t)) ** power / 2;
+  }
+  return t;
+};
+
+class BlockAreaRenderer {
+  constructor() {
+    this.areas = [];
+    this.active = [];
+    this.states = [];
+    this.cursor = 0;
+    this.lastTime = -Infinity;
+    this.layer = null;
+  }
+
+  load(areas = []) {
+    this.areas = (Array.isArray(areas) ? areas : []).map(area => ({
+      ...area,
+      rotateEvents: [...(area.rotateEvents || [])].sort((a, b) => a.time - b.time),
+      moveEvents: [...(area.moveEvents || [])].sort((a, b) => a.time - b.time),
+      scaleEvents: [...(area.scaleEvents || [])].sort((a, b) => a.time - b.time)
+    })).sort((a, b) => a.appearTime - b.appearTime);
+    this.active = [];
+    this.states = [];
+    this.cursor = 0;
+    this.lastTime = -Infinity;
+  }
+
+  static sample(events, time, field, fallback) {
+    if (!events.length) return { value: fallback, anchor: null };
+    // Upper bound also makes duplicate-time keyframes deterministic.
+    let lo = 0, hi = events.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (events[mid].time <= time) lo = mid + 1;
+      else hi = mid;
+    }
+    const from = events[Math.max(0, lo - 1)];
+    const to = events[Math.min(lo, events.length - 1)];
+    const t = to.time > from.time ? Math.max(0, Math.min(1, (time - from.time) / (to.time - from.time))) : 1;
+    const mix = (a, b, ease) => a + (b - a) * BlockAreaEasing(ease, t);
+    const value = typeof fallback === "number"
+      ? mix(from[field], to[field], to.easeType)
+      : {
+        x: mix(from[field].x, to[field].x, to.easeTypeX),
+        y: mix(from[field].y, to[field].y, to.easeTypeY)
+      };
+    return { value, anchor: to.anchor || from.anchor };
+  }
+
+  static state(area, time, width, height) {
+    const low = area.bottomLeftPercentage, high = area.topRightPercentage;
+    const center = { x: (low.x + high.x) / 2, y: (low.y + high.y) / 2 };
+    const move = this.sample(area.moveEvents, time, "endPosition", center).value;
+    const scale = this.sample(area.scaleEvents, time, "scale", { x: 1, y: 1 });
+    const rotation = this.sample(area.rotateEvents, time, "rotation", 0);
+    const sa = scale.anchor || center, ra = rotation.anchor || center;
+    const angle = rotation.value * Math.PI / 180;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const points = [[low.x, low.y], [high.x, low.y], [high.x, high.y], [low.x, high.y]].map(([x, y]) => {
+      // Rotate in physical space so a rectangle stays rectangular at any aspect.
+      x = (sa.x + (x - sa.x) * scale.value.x - ra.x) * width;
+      y = (sa.y + (y - sa.y) * scale.value.y - ra.y) * height;
+      return {
+        x: (ra.x + move.x - center.x) * width + x * cos - y * sin,
+        y: height - ((ra.y + move.y - center.y) * height + x * sin + y * cos)
+      };
+    });
+    let opacity = 1;
+    if (time < area.enableTime && area.enableTime > area.appearTime) {
+      opacity = (time - area.appearTime) / (area.enableTime - area.appearTime);
+    } else if (time >= area.disableTime && area.disappearTime > area.disableTime) {
+      opacity = (area.disappearTime - time) / (area.disappearTime - area.disableTime);
+    }
+    return { area, points, opacity: Math.max(0, Math.min(1, opacity)) };
+  }
+
+  update(time, width, height) {
+    if (time < this.lastTime) {
+      this.cursor = 0;
+      this.active = [];
+    }
+    while (this.cursor < this.areas.length && this.areas[this.cursor].appearTime <= time) {
+      const area = this.areas[this.cursor++];
+      if (time < area.disappearTime) this.active.push(area);
+    }
+    this.active = this.active.filter(area => time < area.disappearTime);
+    this.states = this.active.map(area => BlockAreaRenderer.state(area, time, width, height));
+    this.lastTime = time;
+  }
+
+  static contains(points, x, y) {
+    let positive = false, negative = false, twiceArea = 0;
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i], b = points[(i + 1) % points.length];
+      const cross = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+      positive ||= cross > 1e-7;
+      negative ||= cross < -1e-7;
+      twiceArea += a.x * b.y - b.x * a.y;
+    }
+    // Accept either winding (negative scales), but not collapsed rectangles.
+    return Math.abs(twiceArea) > 1e-7 && !(positive && negative);
+  }
+
+  isBlocked(x, y, width, height) {
+    if (x < 0 || y < 0 || x > width || y > height) return false;
+    let blocked = false;
+    for (const { area, points } of this.states) {
+      if (this.lastTime < area.enableTime || this.lastTime >= area.disableTime) continue;
+      if (!BlockAreaRenderer.contains(points, x, y)) continue;
+      if (area.isSubtract) return false;
+      blocked = true;
+    }
+    return blocked;
+  }
+
+  draw(ctx, left, width, height, pixelRatio) {
+    if (!this.states.length) return;
+    if (!this.layer) this.layer = document.createElement("canvas");
+    // Supersample the complete mask, including cutouts, before compositing.
+    // Two samples per CSS pixel keep rotated edges smooth on standard displays.
+    const renderScale = Math.max(2, pixelRatio);
+    const w = Math.max(1, Math.round(width * renderScale));
+    const h = Math.max(1, Math.round(height * renderScale));
+    if (this.layer.width !== w || this.layer.height !== h) {
+      this.layer.width = w;
+      this.layer.height = h;
+    }
+    const overlay = this.layer.getContext("2d");
+    overlay.setTransform(w / width, 0, 0, h / height, 0, 0);
+    overlay.clearRect(0, 0, width, height);
+    overlay.fillStyle = "#ff304b";
+    // Union first, then cutouts, independent of JSON ordering. Apply the final
+    // transparency once so dense overlapping rectangles do not become opaque.
+    for (const subtract of [false, true]) {
+      overlay.globalCompositeOperation = subtract ? "destination-out" : "source-over";
+      for (const state of this.states) {
+        if (!!state.area.isSubtract !== subtract || state.opacity <= 0) continue;
+        overlay.globalAlpha = state.opacity;
+        overlay.beginPath();
+        state.points.forEach((p, i) => i ? overlay.lineTo(p.x, p.y) : overlay.moveTo(p.x, p.y));
+        overlay.closePath();
+        overlay.fill();
+      }
+    }
+    overlay.globalAlpha = 1;
+    overlay.globalCompositeOperation = "source-over";
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, 0, width, height);
+    ctx.clip();
+    ctx.globalAlpha = 0.3;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(this.layer, left, 0, width, height);
+    ctx.restore();
+  }
+}
+
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const pauseIcon = new Image();
@@ -73,7 +242,7 @@ let level = {
 };
 
 let settings = {
-  speed: 9.0, // 流速
+  speed: 6.0, // 流速， 默认6.0
   globalSpeed: 1.0,
   showAccuracy: true,
   showJudgement: true,
@@ -106,6 +275,7 @@ let lineStates = [];
 let fingers = [];
 let fingerById = new Map();
 let pendingFingerEvents = [];
+const blockAreas = new BlockAreaRenderer();
 
 class ScoreControl {
   constructor() {
@@ -335,7 +505,7 @@ class HoldControl {
     if (this.judged && !this.judgeOver) {
       let isHolding = false;
       for (let finger of fingers) {
-        if (!finger.pressed) continue;
+        if (!finger.pressed || finger.blocked) continue;
         let state = lineStates[Math.floor(this.note.judgeLineIndex / 2)];
         if (!state) continue;
         let position = fingerOnLine(finger, state);
@@ -387,7 +557,7 @@ class DragControl {
 
     if (Math.abs(dt) <= 0.1 && !this.isJudged) {
       for (let finger of fingers) {
-        if (!finger.pressed) continue;
+        if (!finger.pressed || finger.blocked) continue;
         let state = lineStates[Math.floor(this.note.judgeLineIndex / 2)];
         if (!state) continue;
         let position = fingerOnLine(finger, state);
@@ -470,6 +640,7 @@ function resetNoteControls(fromTime = -Infinity) {
 }
 
 function prepareChart(chart) {
+  blockAreas.load(chart.blockAreaList);
   let notes = [];
   for (let lineIndex = 0; lineIndex < chart.judgeLineList.length; lineIndex++) {
     let line = chart.judgeLineList[lineIndex];
@@ -863,6 +1034,8 @@ function drawFrame() {
   ctx.fillRect(0, 0, screenWidth, screenHeight);
   drawBackground();
 
+  blockAreas.update(level.nowTime, visibleWidth, screenHeight);
+  blockAreas.draw(ctx, sideMaskWidth, visibleWidth, screenHeight, deviceScale);
   drawJudgeLines();
   if (sideMaskWidth > 0) {
     ctx.fillStyle = "#111";
@@ -913,6 +1086,10 @@ function queueFingerEvent(fingerId, phase, clientX, clientY) {
 }
 
 function syncFingers() {
+  // Refresh before judging, including when an animated area moves onto a
+  // stationary finger. Rendering uses the same transformed polygons.
+  blockAreas.update(level.nowTime, visibleWidth, screenHeight);
+  const rect = canvas.getBoundingClientRect();
   for (let finger of fingers) {
     finger.isNewClick = false;
     finger.lastPosition = finger.nowPosition;
@@ -921,15 +1098,18 @@ function syncFingers() {
   }
   for (let event of pendingFingerEvents) {
     let position = {
-      x: screenToWorldX(event.clientX),
-      y: screenToWorldY(event.clientY)
+      x: screenToWorldX(event.clientX - rect.left),
+      y: screenToWorldY(event.clientY - rect.top)
     };
     let finger = fingerById.get(event.fingerId);
-    if (!finger) {
+    if (event.phase === "began") {
+      // A release and new press may share an ID and arrive in the same frame.
+      if (finger) fingers.splice(fingers.indexOf(finger), 1);
       finger = {
         fingerId: event.fingerId,
-        pressed: event.phase != "ended" && event.phase != "canceled",
-        isNewClick: event.phase == "began",
+        pressed: true,
+        blocked: false,
+        isNewClick: true,
         isNewFlick: false,
         stopped: true,
         lastPosition: position,
@@ -939,23 +1119,47 @@ function syncFingers() {
       };
       fingers.push(finger);
       fingerById.set(event.fingerId, finger);
+      updateFingerBlock(finger);
       continue;
     }
+    // Stray motion after pause/cancel is not a new contact.
+    if (!finger || !finger.pressed) continue;
     finger.nowPosition = position;
     finger.nowMove = {
       x: finger.nowPosition.x - finger.lastPosition.x,
       y: finger.nowPosition.y - finger.lastPosition.y
     };
     finger.pressed = event.phase != "ended" && event.phase != "canceled";
-    if (event.phase == "began") finger.isNewClick = true;
+    updateFingerBlock(finger);
+    if (event.phase === "canceled") {
+      finger.isNewClick = false;
+      finger.isNewFlick = false;
+    }
   }
   pendingFingerEvents = [];
+  for (const finger of fingers) {
+    if (finger.pressed) updateFingerBlock(finger);
+  }
+}
+
+function updateFingerBlock(finger) {
+  // Latch for the entire contact: sliding back out never re-enables judging.
+  finger.blocked ||= blockAreas.isBlocked(
+    worldToScreenX(finger.nowPosition.x) - sideMaskWidth,
+    worldToScreenY(finger.nowPosition.y), visibleWidth, screenHeight
+  );
+  if (finger.blocked) {
+    finger.isNewClick = false;
+    finger.isNewFlick = false;
+    finger.stopped = true;
+  }
 }
 
 function updateFlickTrigger(deltaTime) {
   if (deltaTime <= 0) return;
   let flickJudgeSpeed = 0.06 / 380 * settings.dpi;
   for (let finger of fingers) {
+    if (finger.blocked) continue;
     if (!finger.pressed && finger.nowMove.x == 0 && finger.nowMove.y == 0) continue;
     let lastMoveLength = Math.hypot(finger.lastMove.x, finger.lastMove.y);
     let flickSpeed = 0;
@@ -1095,6 +1299,7 @@ function CheckFlick(finger) {
 
 function updateNoteMatching() {
   for (let finger of fingers) {
+    if (finger.blocked) continue;
     if (finger.isNewClick) CheckNote(finger);
     if (finger.isNewFlick) CheckFlick(finger);
   }
@@ -1230,17 +1435,15 @@ function handlePointerDown(event) {
 }
 function handlePointerMove(event) {
   if (event.pointerType == "touch") return;
-  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
+  if (!event.buttons) return;
   queueFingerEvent(`pointer:${event.pointerId}`, "moved", event.clientX, event.clientY);
 }
 function handlePointerUp(event) {
   if (event.pointerType == "touch") return;
-  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
   queueFingerEvent(`pointer:${event.pointerId}`, "ended", event.clientX, event.clientY);
 }
 function handlePointerCancel(event) {
   if (event.pointerType == "touch") return;
-  if (!fingerById.has(`pointer:${event.pointerId}`)) return;
   queueFingerEvent(`pointer:${event.pointerId}`, "canceled", event.clientX, event.clientY);
 }
 
@@ -1424,6 +1627,7 @@ zipInput.addEventListener("change", async () => {
     clearFingers();
     level.info = {};
     level.chart = null;
+    blockAreas.load();
     level.nowTime = -3;
     level.startTime = -1;
     level.startDelay = 1.5;
