@@ -246,6 +246,8 @@ let settings = {
   globalSpeed: 1.0,
   showAccuracy: true,
   showJudgement: true,
+  showTouchPoints: true,
+  autoplay: false,
   dpi: 264, // Screen.dpi
   offset: 0.0, // 谱面延时
   noteScale: 1.0, // 按键缩放
@@ -977,7 +979,7 @@ function drawComboText() {
   ctx.fillStyle = "#fff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("COMBO", x, y);
+  ctx.fillText(settings.autoplay ? "AUTOPLAY" : "COMBO", x, y);
   ctx.restore();
 }
 
@@ -1027,6 +1029,39 @@ function resizeCanvas() {
   ctx.setTransform(deviceScale, 0, 0, deviceScale, 0, 0);
 }
 
+function drawTouchPoints() {
+  if (!settings.showTouchPoints || paused) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(sideMaskWidth, 0, visibleWidth, screenHeight);
+  ctx.clip();
+  const radius = Math.max(32, screenHeight * 0.08);
+  for (const finger of fingers) {
+    if (!finger.pressed) continue;
+    const x = worldToScreenX(finger.nowPosition.x);
+    const y = worldToScreenY(finger.nowPosition.y);
+    ctx.strokeStyle = finger.blocked ? "#ff647c" : "#b7efff";
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(3, screenHeight * 0.005), 0, Math.PI * 2);
+    ctx.fill();
+    // Repeating expanding rings stay centered on the current contact. Their
+    // lifetime belongs to the finger, so releasing leaves no trailing effects.
+    for (let i = 0; i < 2; i++) {
+      const age = finger.touchAge - i * 0.325;
+      if (age < 0) continue;
+      const progress = (age % 0.65) / 0.65;
+      ctx.globalAlpha = 0.65 * (1 - progress);
+      ctx.lineWidth = Math.max(1.5, screenHeight * 0.002);
+      ctx.beginPath();
+      ctx.arc(x, y, 6 + radius * progress, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 function drawFrame() {
   document.body.classList.toggle("paused", paused);
   ctx.clearRect(0, 0, screenWidth, screenHeight);
@@ -1037,6 +1072,7 @@ function drawFrame() {
   blockAreas.update(level.nowTime, visibleWidth, screenHeight);
   blockAreas.draw(ctx, sideMaskWidth, visibleWidth, screenHeight, deviceScale);
   drawJudgeLines();
+  drawTouchPoints();
   if (sideMaskWidth > 0) {
     ctx.fillStyle = "#111";
     ctx.fillRect(0, 0, sideMaskWidth, screenHeight);
@@ -1049,8 +1085,8 @@ function drawFrame() {
   if (settings.showJudgement) drawJudgement();
   if (scoreControl.combo >= 3) {
     drawCombo(scoreControl.combo);
-    drawComboText();
   }
+  if (scoreControl.combo >= 3 || settings.autoplay) drawComboText();
   drawSongsName(level.info.name);
   drawSongsLevel(level.info.level);
   if (paused) drawPauseBar();
@@ -1109,6 +1145,7 @@ function syncFingers() {
         fingerId: event.fingerId,
         pressed: true,
         blocked: false,
+        touchAge: 0,
         isNewClick: true,
         isNewFlick: false,
         stopped: true,
@@ -1307,12 +1344,34 @@ function updateNoteMatching() {
 
 function updateNoteControls() {
   for (let i = noteControls.length - 1; i >= 0; i--) {
-    if (noteControls[i].Judge()) noteControls.splice(i, 1);
+    const control = noteControls[i];
+    if (settings.autoplay) {
+      const note = control.note;
+      if (level.nowTime < note.realTime) continue;
+      note.isJudged = true;
+      if (note.type === 4) note.isJudgedForFlick = true;
+      if (note.type === 3) {
+        // Sustain holds until their tails. Keep the manual controller coherent
+        // if autoplay is switched off while a hold is in progress.
+        control.isJudged = true;
+        control.judged = true;
+        control.isPerfect = true;
+        control.judgeTime = 0;
+        control.safeFrame = 2;
+        if (level.nowTime < note.realTime + note.holdTime) continue;
+        control.judgeOver = true;
+      }
+      scoreControl.Perfect(note, 0);
+      noteControls.splice(i, 1);
+    } else if (control.Judge()) {
+      noteControls.splice(i, 1);
+    }
   }
 }
 
 function updateFingers(deltaTime) {
   syncFingers();
+  if (settings.autoplay) return;
   updateFlickTrigger(deltaTime);
   updateNoteMatching();
 }
@@ -1561,6 +1620,9 @@ function gameLoop(now) {
     } else {
       syncFingers();
     }
+    for (const finger of fingers) {
+      if (finger.pressed) finger.touchAge += Math.max(0, deltaTime);
+    }
   }
   drawFrame();
   finishFingerFrame();
@@ -1605,6 +1667,13 @@ document.getElementById("showAccuracy").addEventListener("change", (event) => {
 });
 document.getElementById("showJudgement").addEventListener("change", (event) => {
   settings.showJudgement = event.target.checked;
+});
+document.getElementById("showTouchPoints").addEventListener("change", (event) => {
+  settings.showTouchPoints = event.target.checked;
+});
+document.getElementById("autoplay").addEventListener("change", (event) => {
+  settings.autoplay = event.target.checked;
+  clearFingers();
 });
 
 window.addEventListener("resize", resizeCanvas);
